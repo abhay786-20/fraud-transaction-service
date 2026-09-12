@@ -12,6 +12,7 @@ type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
 	Auth     AuthConfig
+	Kafka    KafkaConfig
 }
 
 type ServerConfig struct {
@@ -34,6 +35,11 @@ type DatabaseConfig struct {
 // fraud-auth-service — never to issue them itself.
 type AuthConfig struct {
 	JWTSecret string
+}
+
+type KafkaConfig struct {
+	Brokers []string
+	Topic   string
 }
 
 func Load() (*Config, error) {
@@ -59,6 +65,10 @@ func Load() (*Config, error) {
 		},
 		Auth: AuthConfig{
 			JWTSecret: os.Getenv(constants.EnvJWTSecret),
+		},
+		Kafka: KafkaConfig{
+			Brokers: env.GetStringSlice(constants.EnvKafkaBrokers, []string{"localhost:9092"}),
+			Topic:   env.GetString(constants.EnvKafkaTopic, "transactions"),
 		},
 	}
 

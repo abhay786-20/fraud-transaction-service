@@ -21,6 +21,9 @@ const (
 	// coding-plan.md §5 for why (shared-secret approach, deferred the
 	// asymmetric-key upgrade).
 	EnvJWTSecret = "TRANSACTION_JWT_SECRET"
+
+	EnvKafkaBrokers = "TRANSACTION_KAFKA_BROKERS"
+	EnvKafkaTopic   = "TRANSACTION_KAFKA_TOPIC"
 )
 
 // RequiredEnvKeys lists every env var this service cannot start without.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 func GetString(key, fallback string) string {
@@ -23,6 +24,21 @@ func GetInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// GetStringSlice returns key's value split on commas (e.g.
+// "broker1:9092,broker2:9092" -> ["broker1:9092", "broker2:9092"]), or
+// fallback if it's unset or empty.
+func GetStringSlice(key string, fallback []string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parts := strings.Split(value, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }
 
 func ValidateRequired(keys []string) error {
