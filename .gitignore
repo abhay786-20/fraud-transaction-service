@@ -1,0 +1,21 @@
+# Environment variables
+.env
+
+# Build files
+bin/
+build/
+dist/
+tmp/
+*.exe
+*.out
+*.test
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
