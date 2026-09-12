@@ -1,14 +1,16 @@
 package main
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 
 	"github.com/abhay786-20/fraud-transaction-service/internal/config"
 	"github.com/abhay786-20/fraud-transaction-service/internal/db"
+	"github.com/abhay786-20/fraud-transaction-service/internal/handler"
+	"github.com/abhay786-20/fraud-transaction-service/internal/repository"
+	"github.com/abhay786-20/fraud-transaction-service/internal/router"
+	"github.com/abhay786-20/fraud-transaction-service/internal/service"
 	"github.com/abhay786-20/fraud-transaction-service/pkg/constants"
 	"github.com/abhay786-20/fraud-transaction-service/pkg/env"
 	"github.com/abhay786-20/fraud-transaction-service/pkg/logger"
@@ -41,21 +43,13 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	router := gin.Default()
-
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	router.GET("/ready", func(c *gin.Context) {
-		if err := pg.PingContext(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready"})
-	})
+	// Wiring, bottom-up: repository → service → handler → router.
+	txnRepo := repository.NewTransactionRepository(pg, log)
+	txnService := service.NewTransactionService(txnRepo, log)
+	txnHandler := handler.NewTransactionHandler(txnService)
+	r := router.New(pg, cfg.Auth.JWTSecret, txnHandler)
 
 	addr := cfg.Server.Host + ":" + cfg.Server.Port
 	log.Info("starting server", zap.String("addr", addr), zap.String("env", cfg.Env))
-	router.Run(addr)
+	r.Run(addr)
 }

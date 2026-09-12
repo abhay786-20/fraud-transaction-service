@@ -11,6 +11,7 @@ type Config struct {
 	Env      string
 	Server   ServerConfig
 	Database DatabaseConfig
+	Auth     AuthConfig
 }
 
 type ServerConfig struct {
@@ -27,6 +28,12 @@ type DatabaseConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	MaxLifetimeMins int
+}
+
+// AuthConfig holds what this service needs to VERIFY tokens issued by
+// fraud-auth-service — never to issue them itself.
+type AuthConfig struct {
+	JWTSecret string
 }
 
 func Load() (*Config, error) {
@@ -49,6 +56,9 @@ func Load() (*Config, error) {
 			MaxOpenConns:    env.GetInt(constants.EnvDBMaxOpenConns, 25),
 			MaxIdleConns:    env.GetInt(constants.EnvDBMaxIdleConns, 25),
 			MaxLifetimeMins: env.GetInt(constants.EnvDBMaxLifetimeMin, 5),
+		},
+		Auth: AuthConfig{
+			JWTSecret: os.Getenv(constants.EnvJWTSecret),
 		},
 	}
 

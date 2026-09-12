@@ -50,22 +50,22 @@ func (r *postgresTransactionRepository) Create(ctx context.Context, txn *models.
 	}
 	defer tx.Rollback() // no-op if Commit succeeds; cleans up on any early return
 
+	// txn.ID and event.AggregateID are already set by the caller (service
+	// layer generates the ID in Go, before this call) — specifically so
+	// the outbox event's payload can already contain the transaction ID
+	// when it's built, with no chicken-and-egg ordering problem.
 	const insertTxn = `
-		INSERT INTO transactions (sender_id, receiver_id, amount, currency, status)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, created_at, updated_at`
+		INSERT INTO transactions (id, sender_id, receiver_id, amount, currency, status)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING created_at, updated_at`
 
 	row := tx.QueryRowxContext(ctx, insertTxn,
-		txn.SenderID, txn.ReceiverID, txn.Amount, txn.Currency, txn.Status,
+		txn.ID, txn.SenderID, txn.ReceiverID, txn.Amount, txn.Currency, txn.Status,
 	)
-	if err := row.Scan(&txn.ID, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
+	if err := row.Scan(&txn.CreatedAt, &txn.UpdatedAt); err != nil {
 		r.debugQuery("transaction.Create", start, err)
 		return fmt.Errorf("inserting transaction: %w", err)
 	}
-
-	// Now that we know the real transaction ID, stamp it onto the event
-	// before writing it — aggregate_id must point at the row just created.
-	event.AggregateID = txn.ID
 
 	const insertEvent = `
 		INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
