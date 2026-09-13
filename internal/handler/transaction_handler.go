@@ -41,6 +41,10 @@ func (h *TransactionHandler) Create(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrInvalidAmount):
 			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
+		case errors.Is(err, service.ErrReceiverNotFound):
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: err.Error()})
+		case errors.Is(err, service.ErrReceiverInactive):
+			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "something went wrong"})
 		}

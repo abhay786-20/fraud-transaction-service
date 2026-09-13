@@ -24,6 +24,12 @@ const (
 
 	EnvKafkaBrokers = "TRANSACTION_KAFKA_BROKERS"
 	EnvKafkaTopic   = "TRANSACTION_KAFKA_TOPIC"
+
+	// For calling fraud-auth-service's /internal/* routes to verify a
+	// receiver exists. EnvAuthServiceAPIKey must match fraud-auth-service's
+	// AUTH_INTERNAL_API_KEY exactly — same shared-secret pattern as the JWT.
+	EnvAuthServiceBaseURL = "TRANSACTION_AUTH_SERVICE_URL"
+	EnvAuthServiceAPIKey  = "TRANSACTION_INTERNAL_API_KEY"
 )
 
 // RequiredEnvKeys lists every env var this service cannot start without.
@@ -32,6 +38,7 @@ var RequiredEnvKeys = []string{
 	EnvDBPassword,
 	EnvDBName,
 	EnvJWTSecret,
+	EnvAuthServiceAPIKey,
 }
 
 // Accepted values for TRANSACTION_ENV — the app's own convention, not an

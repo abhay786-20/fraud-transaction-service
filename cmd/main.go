@@ -12,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 
+	"github.com/abhay786-20/fraud-transaction-service/internal/authclient"
 	"github.com/abhay786-20/fraud-transaction-service/internal/config"
 	"github.com/abhay786-20/fraud-transaction-service/internal/db"
 	"github.com/abhay786-20/fraud-transaction-service/internal/handler"
@@ -54,7 +55,8 @@ func main() {
 
 	// Wiring, bottom-up: repository → service → handler → router.
 	txnRepo := repository.NewTransactionRepository(pg, log)
-	txnService := service.NewTransactionService(txnRepo, log)
+	authClient := authclient.New(cfg.Auth.ServiceBaseURL, cfg.Auth.ServiceAPIKey)
+	txnService := service.NewTransactionService(txnRepo, authClient, log)
 	txnHandler := handler.NewTransactionHandler(txnService)
 	r := router.New(pg, cfg.Auth.JWTSecret, txnHandler)
 

@@ -12,23 +12,29 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/abhay786-20/fraud-transaction-service/internal/authclient"
 	"github.com/abhay786-20/fraud-transaction-service/internal/models"
 	"github.com/abhay786-20/fraud-transaction-service/internal/repository"
 )
 
-var ErrInvalidAmount = errors.New("amount must be a positive number")
+var (
+	ErrInvalidAmount    = errors.New("amount must be a positive number")
+	ErrReceiverNotFound = errors.New("receiver account not found")
+	ErrReceiverInactive = errors.New("receiver account is inactive")
+)
 
 type TransactionService interface {
 	Create(ctx context.Context, senderID, receiverID, amount, currency string) (*models.Transaction, error)
 }
 
 type transactionService struct {
-	txnRepo repository.TransactionRepository
-	log     *zap.Logger
+	txnRepo    repository.TransactionRepository
+	authClient *authclient.Client
+	log        *zap.Logger
 }
 
-func NewTransactionService(txnRepo repository.TransactionRepository, log *zap.Logger) TransactionService {
-	return &transactionService{txnRepo: txnRepo, log: log}
+func NewTransactionService(txnRepo repository.TransactionRepository, authClient *authclient.Client, log *zap.Logger) TransactionService {
+	return &transactionService{txnRepo: txnRepo, authClient: authClient, log: log}
 }
 
 // transactionCreatedPayload is the JSON shape published to Kafka once the
@@ -52,6 +58,26 @@ func (s *transactionService) Create(ctx context.Context, senderID, receiverID, a
 
 	if currency == "" {
 		currency = "INR"
+	}
+
+	// Verify the receiver is real BEFORE ever touching the database —
+	// unlike sender_id (proven by the caller's JWT), nothing else here
+	// vouches for receiverID at all.
+	receiver, err := s.authClient.GetUser(ctx, receiverID)
+	if err != nil {
+		if errors.Is(err, authclient.ErrUserNotFound) {
+			s.log.Warn("transaction rejected: receiver not found",
+				zap.String("sender_id", senderID), zap.String("receiver_id", receiverID))
+			return nil, ErrReceiverNotFound
+		}
+		s.log.Error("verifying receiver failed",
+			zap.String("sender_id", senderID), zap.String("receiver_id", receiverID), zap.Error(err))
+		return nil, fmt.Errorf("verifying receiver: %w", err)
+	}
+	if !receiver.IsActive {
+		s.log.Warn("transaction rejected: receiver inactive",
+			zap.String("sender_id", senderID), zap.String("receiver_id", receiverID))
+		return nil, ErrReceiverInactive
 	}
 
 	// Generated here, in Go, BEFORE any database call — not left to the

@@ -31,10 +31,13 @@ type DatabaseConfig struct {
 	MaxLifetimeMins int
 }
 
-// AuthConfig holds what this service needs to VERIFY tokens issued by
-// fraud-auth-service — never to issue them itself.
+// AuthConfig holds what this service needs both to VERIFY tokens issued
+// by fraud-auth-service, and to CALL its internal API (service-to-service,
+// via ServiceBaseURL/ServiceAPIKey) — never to issue tokens itself.
 type AuthConfig struct {
-	JWTSecret string
+	JWTSecret      string
+	ServiceBaseURL string
+	ServiceAPIKey  string
 }
 
 type KafkaConfig struct {
@@ -64,7 +67,9 @@ func Load() (*Config, error) {
 			MaxLifetimeMins: env.GetInt(constants.EnvDBMaxLifetimeMin, 5),
 		},
 		Auth: AuthConfig{
-			JWTSecret: os.Getenv(constants.EnvJWTSecret),
+			JWTSecret:      os.Getenv(constants.EnvJWTSecret),
+			ServiceBaseURL: env.GetString(constants.EnvAuthServiceBaseURL, "http://localhost:8081"),
+			ServiceAPIKey:  os.Getenv(constants.EnvAuthServiceAPIKey),
 		},
 		Kafka: KafkaConfig{
 			Brokers: env.GetStringSlice(constants.EnvKafkaBrokers, []string{"localhost:9092"}),
