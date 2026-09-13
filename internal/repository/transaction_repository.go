@@ -25,11 +25,11 @@ type TransactionRepository interface {
 
 type postgresTransactionRepository struct {
 	db         *sqlx.DB
-	walletRepo WalletRepository
+	walletRepo walletTransactor
 	log        *zap.Logger
 }
 
-func NewTransactionRepository(db *sqlx.DB, walletRepo WalletRepository, log *zap.Logger) TransactionRepository {
+func NewTransactionRepository(db *sqlx.DB, walletRepo walletTransactor, log *zap.Logger) TransactionRepository {
 	return &postgresTransactionRepository{db: db, walletRepo: walletRepo, log: log}
 }
 

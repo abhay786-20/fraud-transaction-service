@@ -27,13 +27,22 @@ type TransactionService interface {
 	Create(ctx context.Context, senderID, receiverID, amount, currency string) (*models.Transaction, error)
 }
 
+// UserVerifier is the one method this service needs from authclient.Client
+// — defined here, in the CONSUMING package, not authclient itself (the
+// same "consumer defines the interface it needs" idiom as
+// repository.TransactionRepository). *authclient.Client already satisfies
+// this structurally; a test can hand transactionService a fake instead.
+type UserVerifier interface {
+	GetUser(ctx context.Context, id string) (*authclient.User, error)
+}
+
 type transactionService struct {
 	txnRepo    repository.TransactionRepository
-	authClient *authclient.Client
+	authClient UserVerifier
 	log        *zap.Logger
 }
 
-func NewTransactionService(txnRepo repository.TransactionRepository, authClient *authclient.Client, log *zap.Logger) TransactionService {
+func NewTransactionService(txnRepo repository.TransactionRepository, authClient UserVerifier, log *zap.Logger) TransactionService {
 	return &transactionService{txnRepo: txnRepo, authClient: authClient, log: log}
 }
 

@@ -31,12 +31,26 @@ type dbExecutor interface {
 	GetContext(ctx context.Context, dest any, query string, args ...any) error
 }
 
+// WalletRepository is the public wallet API — what WalletService depends
+// on. Kept free of unexported types in its signatures on purpose, so a
+// fake implementing it can be written from ANY package (e.g. a test in
+// package service) — see walletTransactor below for why that's not just
+// pedantry.
 type WalletRepository interface {
 	Create(ctx context.Context, userID string) (*models.Wallet, error)
 	GetByUserID(ctx context.Context, userID string) (*models.Wallet, error)
 	AddBalance(ctx context.Context, userID, amount string) (*models.Wallet, error)
+}
 
-	// Debit/Credit take an explicit executor — see dbExecutor above.
+// walletTransactor is what TransactionRepository depends on internally —
+// unexported, and deliberately a SEPARATE interface from WalletRepository
+// above, not folded into it. Debit/Credit's dbExecutor parameter is
+// itself unexported, so a type implementing this interface could only
+// ever be written inside THIS package anyway — no other package could
+// spell out the parameter type to satisfy it. Only postgresWalletRepository
+// (below) needs to implement it, and only postgresTransactionRepository
+// ever calls it — both live here, in package repository, so this is fine.
+type walletTransactor interface {
 	Debit(ctx context.Context, exec dbExecutor, userID, amount string) error
 	Credit(ctx context.Context, exec dbExecutor, userID, amount string) error
 }
@@ -46,7 +60,15 @@ type postgresWalletRepository struct {
 	log *zap.Logger
 }
 
-func NewWalletRepository(db *sqlx.DB, log *zap.Logger) WalletRepository {
+// NewWalletRepository deliberately returns the CONCRETE type, not the
+// WalletRepository interface — *postgresWalletRepository satisfies both
+// WalletRepository (for NewWalletService) and walletTransactor (for
+// NewTransactionRepository) at once, with no explicit cast needed at
+// either call site in main.go. Returning the narrower WalletRepository
+// interface here would make it impossible to pass the same value to
+// NewTransactionRepository, since WalletRepository's method set doesn't
+// include Debit/Credit.
+func NewWalletRepository(db *sqlx.DB, log *zap.Logger) *postgresWalletRepository {
 	return &postgresWalletRepository{db: db, log: log}
 }
 
