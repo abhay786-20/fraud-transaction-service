@@ -12,7 +12,7 @@ import (
 )
 
 // New builds the full set of routes for this service.
-func New(pg *sqlx.DB, jwtSecret string, txnHandler *handler.TransactionHandler) *gin.Engine {
+func New(pg *sqlx.DB, jwtSecret string, txnHandler *handler.TransactionHandler, walletHandler *handler.WalletHandler) *gin.Engine {
 	r := gin.Default()
 
 	r.GET("/health", func(c *gin.Context) {
@@ -29,6 +29,10 @@ func New(pg *sqlx.DB, jwtSecret string, txnHandler *handler.TransactionHandler) 
 
 	auth := middleware.Auth(jwtSecret)
 	r.POST("/transactions", auth, txnHandler.Create)
+
+	r.POST("/wallets", auth, walletHandler.Create)
+	r.GET("/wallets/me", auth, walletHandler.GetMine)
+	r.POST("/wallets/topup", auth, walletHandler.TopUp)
 
 	return r
 }

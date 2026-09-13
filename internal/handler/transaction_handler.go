@@ -10,6 +10,7 @@ import (
 
 	"github.com/abhay786-20/fraud-transaction-service/internal/dto"
 	"github.com/abhay786-20/fraud-transaction-service/internal/middleware"
+	"github.com/abhay786-20/fraud-transaction-service/internal/repository"
 	"github.com/abhay786-20/fraud-transaction-service/internal/service"
 )
 
@@ -45,6 +46,10 @@ func (h *TransactionHandler) Create(c *gin.Context) {
 			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: err.Error()})
 		case errors.Is(err, service.ErrReceiverInactive):
 			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
+		case errors.Is(err, repository.ErrInsufficientBalance):
+			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
+		case errors.Is(err, repository.ErrWalletNotFound):
+			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "sender or receiver wallet not found"})
 		default:
 			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "something went wrong"})
 		}

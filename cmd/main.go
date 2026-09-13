@@ -54,11 +54,16 @@ func main() {
 	}
 
 	// Wiring, bottom-up: repository → service → handler → router.
-	txnRepo := repository.NewTransactionRepository(pg, log)
+	// walletRepo is constructed FIRST — txnRepo depends on it (debit/credit
+	// run inside txnRepo's own atomic transaction).
+	walletRepo := repository.NewWalletRepository(pg, log)
+	txnRepo := repository.NewTransactionRepository(pg, walletRepo, log)
 	authClient := authclient.New(cfg.Auth.ServiceBaseURL, cfg.Auth.ServiceAPIKey)
 	txnService := service.NewTransactionService(txnRepo, authClient, log)
+	walletService := service.NewWalletService(walletRepo, log)
 	txnHandler := handler.NewTransactionHandler(txnService)
-	r := router.New(pg, cfg.Auth.JWTSecret, txnHandler)
+	walletHandler := handler.NewWalletHandler(walletService)
+	r := router.New(pg, cfg.Auth.JWTSecret, txnHandler, walletHandler)
 
 	// Outbox worker: separate wiring path from the HTTP request path — it
 	// reads outbox_events directly, publishes to Kafka, marks them done.

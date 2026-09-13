@@ -24,12 +24,13 @@ type TransactionRepository interface {
 }
 
 type postgresTransactionRepository struct {
-	db  *sqlx.DB
-	log *zap.Logger
+	db         *sqlx.DB
+	walletRepo WalletRepository
+	log        *zap.Logger
 }
 
-func NewTransactionRepository(db *sqlx.DB, log *zap.Logger) TransactionRepository {
-	return &postgresTransactionRepository{db: db, log: log}
+func NewTransactionRepository(db *sqlx.DB, walletRepo WalletRepository, log *zap.Logger) TransactionRepository {
+	return &postgresTransactionRepository{db: db, walletRepo: walletRepo, log: log}
 }
 
 func (r *postgresTransactionRepository) debugQuery(op string, start time.Time, err error) {
@@ -49,6 +50,21 @@ func (r *postgresTransactionRepository) Create(ctx context.Context, txn *models.
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback() // no-op if Commit succeeds; cleans up on any early return
+
+	// Debit sender, credit receiver — using tx, the SAME in-flight
+	// transaction as the inserts below, via WalletRepository's
+	// dbExecutor-typed methods. If the sender's balance is too low,
+	// Debit fails here and NOTHING commits: no money moves, no
+	// transaction row, no outbox event — the deferred Rollback cleans up
+	// the whole attempt atomically.
+	if err := r.walletRepo.Debit(ctx, tx, txn.SenderID, txn.Amount); err != nil {
+		r.debugQuery("transaction.Create", start, err)
+		return fmt.Errorf("sender wallet: %w", err)
+	}
+	if err := r.walletRepo.Credit(ctx, tx, txn.ReceiverID, txn.Amount); err != nil {
+		r.debugQuery("transaction.Create", start, err)
+		return fmt.Errorf("receiver wallet: %w", err)
+	}
 
 	// txn.ID and event.AggregateID are already set by the caller (service
 	// layer generates the ID in Go, before this call) — specifically so
