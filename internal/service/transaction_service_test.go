@@ -36,6 +36,13 @@ func (f *fakeTransactionRepository) GetByID(ctx context.Context, id string) (*mo
 	return nil, repository.ErrTransactionNotFound
 }
 
+func (f *fakeTransactionRepository) List(ctx context.Context, filter repository.TransactionListFilter) ([]models.Transaction, int, error) {
+	if f.created == nil {
+		return nil, 0, nil
+	}
+	return []models.Transaction{*f.created}, 1, nil
+}
+
 // fakeUserVerifier is an in-memory stand-in for UserVerifier (normally
 // *authclient.Client, calling fraud-auth-service over HTTP) — this is
 // exactly why UserVerifier was pulled out as an interface in the first

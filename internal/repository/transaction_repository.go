@@ -15,12 +15,24 @@ import (
 
 var ErrTransactionNotFound = errors.New("transaction not found")
 
+// TransactionListFilter mirrors fraud-auth-service's UserListFilter shape —
+// just pagination for now, no column filters yet (every transaction's
+// status is currently always "completed", so a status filter wouldn't
+// narrow anything).
+type TransactionListFilter struct {
+	Limit  int
+	Offset int
+}
+
 type TransactionRepository interface {
 	// Create atomically inserts both txn and event in a single database
 	// transaction — the Outbox Pattern's actual guarantee: the event can
 	// never be committed without the transaction row, or vice versa.
 	Create(ctx context.Context, txn *models.Transaction, event *models.OutboxEvent) error
 	GetByID(ctx context.Context, id string) (*models.Transaction, error)
+	// List powers the admin dashboard's Transactions tab — most-recent
+	// first, paginated, plus the total count across all pages.
+	List(ctx context.Context, filter TransactionListFilter) ([]models.Transaction, int, error)
 }
 
 type postgresTransactionRepository struct {
@@ -117,4 +129,33 @@ func (r *postgresTransactionRepository) GetByID(ctx context.Context, id string) 
 		return nil, fmt.Errorf("getting transaction: %w", err)
 	}
 	return &txn, nil
+}
+
+func (r *postgresTransactionRepository) List(ctx context.Context, filter TransactionListFilter) ([]models.Transaction, int, error) {
+	start := time.Now()
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := r.db.GetContext(ctx, &total, "SELECT COUNT(*) FROM transactions"); err != nil {
+		r.debugQuery("transaction.List.count", start, err)
+		return nil, 0, fmt.Errorf("counting transactions: %w", err)
+	}
+
+	var txns []models.Transaction
+	err := r.db.SelectContext(ctx, &txns,
+		"SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2", limit, offset)
+	r.debugQuery("transaction.List", start, err)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing transactions: %w", err)
+	}
+
+	return txns, total, nil
 }

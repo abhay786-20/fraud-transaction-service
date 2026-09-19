@@ -18,6 +18,7 @@ var (
 	ErrWalletNotFound      = errors.New("wallet not found")
 	ErrWalletAlreadyExists = errors.New("wallet already exists")
 	ErrInsufficientBalance = errors.New("insufficient balance")
+	ErrWalletDisabled      = errors.New("wallet is disabled")
 )
 
 // dbExecutor is satisfied structurally by both *sqlx.DB and *sqlx.Tx —
@@ -39,7 +40,9 @@ type dbExecutor interface {
 type WalletRepository interface {
 	Create(ctx context.Context, userID string) (*models.Wallet, error)
 	GetByUserID(ctx context.Context, userID string) (*models.Wallet, error)
+	GetByUserIDs(ctx context.Context, userIDs []string) ([]models.Wallet, error)
 	AddBalance(ctx context.Context, userID, amount string) (*models.Wallet, error)
+	SetEnabled(ctx context.Context, userID string, enabled bool) (*models.Wallet, error)
 }
 
 // walletTransactor is what TransactionRepository depends on internally —
@@ -82,11 +85,11 @@ func (r *postgresWalletRepository) debugQuery(op string, start time.Time, err er
 
 func (r *postgresWalletRepository) Create(ctx context.Context, userID string) (*models.Wallet, error) {
 	start := time.Now()
-	const query = `INSERT INTO wallets (user_id) VALUES ($1) RETURNING balance, created_at, updated_at`
+	const query = `INSERT INTO wallets (user_id) VALUES ($1) RETURNING balance, is_enabled, created_at, updated_at`
 
 	wallet := &models.Wallet{UserID: userID}
 	row := r.db.QueryRowxContext(ctx, query, userID)
-	err := row.Scan(&wallet.Balance, &wallet.CreatedAt, &wallet.UpdatedAt)
+	err := row.Scan(&wallet.Balance, &wallet.IsEnabled, &wallet.CreatedAt, &wallet.UpdatedAt)
 	r.debugQuery("wallet.Create", start, err)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -111,24 +114,80 @@ func (r *postgresWalletRepository) GetByUserID(ctx context.Context, userID strin
 	return &wallet, nil
 }
 
+func (r *postgresWalletRepository) GetByUserIDs(ctx context.Context, userIDs []string) ([]models.Wallet, error) {
+	start := time.Now()
+	var wallets []models.Wallet
+	err := r.db.SelectContext(ctx, &wallets, "SELECT * FROM wallets WHERE user_id = ANY($1)", pq.Array(userIDs))
+	r.debugQuery("wallet.GetByUserIDs", start, err)
+	if err != nil {
+		return nil, fmt.Errorf("getting wallets: %w", err)
+	}
+	return wallets, nil
+}
+
+// AddBalance is used by both the owner's own top-up (via WalletService) and
+// requires the wallet to be enabled, same as Debit/Credit — a disabled
+// wallet is meant to be fully frozen, not just blocked from sending.
 func (r *postgresWalletRepository) AddBalance(ctx context.Context, userID, amount string) (*models.Wallet, error) {
 	start := time.Now()
 	const query = `
 		UPDATE wallets SET balance = balance + $1, updated_at = now()
-		WHERE user_id = $2
-		RETURNING balance, created_at, updated_at`
+		WHERE user_id = $2 AND is_enabled = true
+		RETURNING balance, is_enabled, created_at, updated_at`
 
 	wallet := &models.Wallet{UserID: userID}
 	row := r.db.QueryRowxContext(ctx, query, amount, userID)
-	err := row.Scan(&wallet.Balance, &wallet.CreatedAt, &wallet.UpdatedAt)
+	err := row.Scan(&wallet.Balance, &wallet.IsEnabled, &wallet.CreatedAt, &wallet.UpdatedAt)
 	r.debugQuery("wallet.AddBalance", start, err)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrWalletNotFound
+			return nil, r.classifyMissingOrDisabled(ctx, userID)
 		}
 		return nil, fmt.Errorf("adding balance: %w", err)
 	}
 	return wallet, nil
+}
+
+// SetEnabled is admin-only (enforced by the handler/route, not here) —
+// toggles whether a wallet can move money at all.
+func (r *postgresWalletRepository) SetEnabled(ctx context.Context, userID string, enabled bool) (*models.Wallet, error) {
+	start := time.Now()
+	const query = `
+		UPDATE wallets SET is_enabled = $1, updated_at = now()
+		WHERE user_id = $2
+		RETURNING balance, is_enabled, created_at, updated_at`
+
+	wallet := &models.Wallet{UserID: userID}
+	row := r.db.QueryRowxContext(ctx, query, enabled, userID)
+	err := row.Scan(&wallet.Balance, &wallet.IsEnabled, &wallet.CreatedAt, &wallet.UpdatedAt)
+	r.debugQuery("wallet.SetEnabled", start, err)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrWalletNotFound
+		}
+		return nil, fmt.Errorf("setting wallet enabled: %w", err)
+	}
+	return wallet, nil
+}
+
+// classifyMissingOrDisabled distinguishes "wallet doesn't exist" from
+// "wallet exists but is disabled" after an UPDATE ... RETURNING affected
+// zero rows — used by AddBalance the same way Debit/Credit's own inline
+// checks do, since RETURNING queries have no RowsAffected() to branch on
+// before the sql.ErrNoRows already happened.
+func (r *postgresWalletRepository) classifyMissingOrDisabled(ctx context.Context, userID string) error {
+	var isEnabled sql.NullBool
+	err := r.db.GetContext(ctx, &isEnabled, "SELECT is_enabled FROM wallets WHERE user_id = $1", userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrWalletNotFound
+		}
+		return fmt.Errorf("checking wallet existence: %w", err)
+	}
+	if !isEnabled.Bool {
+		return ErrWalletDisabled
+	}
+	return ErrWalletNotFound
 }
 
 // Debit is atomic and race-free in a single statement: the WHERE clause
@@ -137,7 +196,7 @@ func (r *postgresWalletRepository) AddBalance(ctx context.Context, userID, amoun
 func (r *postgresWalletRepository) Debit(ctx context.Context, exec dbExecutor, userID, amount string) error {
 	const query = `
 		UPDATE wallets SET balance = balance - $1, updated_at = now()
-		WHERE user_id = $2 AND balance >= $1`
+		WHERE user_id = $2 AND balance >= $1 AND is_enabled = true`
 
 	result, err := exec.ExecContext(ctx, query, amount, userID)
 	if err != nil {
@@ -148,15 +207,19 @@ func (r *postgresWalletRepository) Debit(ctx context.Context, exec dbExecutor, u
 		return fmt.Errorf("checking rows affected: %w", err)
 	}
 	if n == 0 {
-		// Zero rows changed means either the wallet doesn't exist, or the
-		// balance was too low — distinguish with one more lookup so the
+		// Zero rows changed means the wallet doesn't exist, is disabled, or
+		// the balance was too low — distinguish with one more lookup so the
 		// caller gets an accurate error either way.
-		var exists bool
-		if err := exec.GetContext(ctx, &exists, "SELECT EXISTS(SELECT 1 FROM wallets WHERE user_id = $1)", userID); err != nil {
+		var wallet sql.NullBool
+		err := exec.GetContext(ctx, &wallet, "SELECT is_enabled FROM wallets WHERE user_id = $1", userID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrWalletNotFound
+			}
 			return fmt.Errorf("checking wallet existence: %w", err)
 		}
-		if !exists {
-			return ErrWalletNotFound
+		if !wallet.Bool {
+			return ErrWalletDisabled
 		}
 		return ErrInsufficientBalance
 	}
@@ -164,7 +227,7 @@ func (r *postgresWalletRepository) Debit(ctx context.Context, exec dbExecutor, u
 }
 
 func (r *postgresWalletRepository) Credit(ctx context.Context, exec dbExecutor, userID, amount string) error {
-	const query = `UPDATE wallets SET balance = balance + $1, updated_at = now() WHERE user_id = $2`
+	const query = `UPDATE wallets SET balance = balance + $1, updated_at = now() WHERE user_id = $2 AND is_enabled = true`
 
 	result, err := exec.ExecContext(ctx, query, amount, userID)
 	if err != nil {
@@ -175,6 +238,17 @@ func (r *postgresWalletRepository) Credit(ctx context.Context, exec dbExecutor, 
 		return fmt.Errorf("checking rows affected: %w", err)
 	}
 	if n == 0 {
+		var wallet sql.NullBool
+		err := exec.GetContext(ctx, &wallet, "SELECT is_enabled FROM wallets WHERE user_id = $1", userID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrWalletNotFound
+			}
+			return fmt.Errorf("checking wallet existence: %w", err)
+		}
+		if !wallet.Bool {
+			return ErrWalletDisabled
+		}
 		return ErrWalletNotFound
 	}
 	return nil

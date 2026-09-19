@@ -28,11 +28,15 @@ func New(pg *sqlx.DB, jwtSecret string, txnHandler *handler.TransactionHandler, 
 	})
 
 	auth := middleware.Auth(jwtSecret)
+	requireAdmin := middleware.RequireAdmin()
 	r.POST("/transactions", auth, txnHandler.Create)
+	r.GET("/transactions", auth, requireAdmin, txnHandler.List)
 
 	r.POST("/wallets", auth, walletHandler.Create)
 	r.GET("/wallets/me", auth, walletHandler.GetMine)
 	r.POST("/wallets/topup", auth, walletHandler.TopUp)
+	r.GET("/wallets", auth, requireAdmin, walletHandler.List)
+	r.PATCH("/wallets/:userId", auth, requireAdmin, walletHandler.SetEnabled)
 
 	return r
 }

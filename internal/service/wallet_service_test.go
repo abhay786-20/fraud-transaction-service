@@ -29,7 +29,7 @@ func (f *fakeWalletRepository) Create(ctx context.Context, userID string) (*mode
 	if _, exists := f.wallets[userID]; exists {
 		return nil, repository.ErrWalletAlreadyExists
 	}
-	wallet := &models.Wallet{UserID: userID, Balance: "0.00"}
+	wallet := &models.Wallet{UserID: userID, Balance: "0.00", IsEnabled: true}
 	f.wallets[userID] = wallet
 	return wallet, nil
 }
@@ -39,6 +39,25 @@ func (f *fakeWalletRepository) GetByUserID(ctx context.Context, userID string) (
 	if !ok {
 		return nil, repository.ErrWalletNotFound
 	}
+	return wallet, nil
+}
+
+func (f *fakeWalletRepository) GetByUserIDs(ctx context.Context, userIDs []string) ([]models.Wallet, error) {
+	wallets := make([]models.Wallet, 0, len(userIDs))
+	for _, id := range userIDs {
+		if wallet, ok := f.wallets[id]; ok {
+			wallets = append(wallets, *wallet)
+		}
+	}
+	return wallets, nil
+}
+
+func (f *fakeWalletRepository) SetEnabled(ctx context.Context, userID string, enabled bool) (*models.Wallet, error) {
+	wallet, ok := f.wallets[userID]
+	if !ok {
+		return nil, repository.ErrWalletNotFound
+	}
+	wallet.IsEnabled = enabled
 	return wallet, nil
 }
 

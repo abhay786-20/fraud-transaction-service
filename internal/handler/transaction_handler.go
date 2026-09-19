@@ -5,6 +5,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -50,6 +51,8 @@ func (h *TransactionHandler) Create(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
 		case errors.Is(err, repository.ErrWalletNotFound):
 			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "sender or receiver wallet not found"})
+		case errors.Is(err, repository.ErrWalletDisabled):
+			c.JSON(http.StatusForbidden, dto.ErrorResponse{Error: "sender or receiver wallet is disabled"})
 		default:
 			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "something went wrong"})
 		}
@@ -57,4 +60,34 @@ func (h *TransactionHandler) Create(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, dto.NewTransactionResponse(txn))
+}
+
+// List handles GET /transactions — admin-only, enforced by
+// middleware.RequireAdmin on the route. Powers the admin dashboard's
+// Transactions tab.
+func (h *TransactionHandler) List(c *gin.Context) {
+	filter := repository.TransactionListFilter{
+		Limit:  parseIntQuery(c, "limit", 20),
+		Offset: parseIntQuery(c, "offset", 0),
+	}
+
+	txns, total, err := h.txnService.List(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "something went wrong"})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.NewTransactionListResponse(txns, total, filter.Limit, filter.Offset))
+}
+
+func parseIntQuery(c *gin.Context, key string, fallback int) int {
+	value := c.Query(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

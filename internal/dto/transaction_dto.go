@@ -41,3 +41,24 @@ func NewTransactionResponse(t *models.Transaction) TransactionResponse {
 		CreatedAt:  t.CreatedAt,
 	}
 }
+
+// TransactionListResponse is the paginated response body for GET /transactions.
+type TransactionListResponse struct {
+	Transactions []TransactionResponse `json:"transactions"`
+	Total        int                   `json:"total"`
+	Limit        int                   `json:"limit"`
+	Offset       int                   `json:"offset"`
+}
+
+func NewTransactionListResponse(txns []models.Transaction, total, limit, offset int) TransactionListResponse {
+	responses := make([]TransactionResponse, len(txns))
+	for i := range txns {
+		responses[i] = NewTransactionResponse(&txns[i])
+	}
+	return TransactionListResponse{
+		Transactions: responses,
+		Total:        total,
+		Limit:        limit,
+		Offset:       offset,
+	}
+}

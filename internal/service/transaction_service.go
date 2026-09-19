@@ -25,6 +25,9 @@ var (
 
 type TransactionService interface {
 	Create(ctx context.Context, senderID, receiverID, amount, currency string) (*models.Transaction, error)
+	// List is admin-only (enforced by the handler/route) — powers the
+	// admin dashboard's Transactions tab.
+	List(ctx context.Context, filter repository.TransactionListFilter) ([]models.Transaction, int, error)
 }
 
 // UserVerifier is the one method this service needs from authclient.Client
@@ -136,4 +139,8 @@ func (s *transactionService) Create(ctx context.Context, senderID, receiverID, a
 		zap.String("amount", amount),
 	)
 	return txn, nil
+}
+
+func (s *transactionService) List(ctx context.Context, filter repository.TransactionListFilter) ([]models.Transaction, int, error) {
+	return s.txnRepo.List(ctx, filter)
 }

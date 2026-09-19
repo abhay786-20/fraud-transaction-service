@@ -44,6 +44,21 @@ func Auth(jwtSecret string) gin.HandlerFunc {
 	}
 }
 
+// RequireAdmin mirrors fraud-auth-service's middleware of the same name —
+// both services parse the same shared-secret JWT, so claims.Role is
+// available here identically. Must run after Auth.
+func RequireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		claims := GetClaims(c)
+		if claims == nil || claims.Role != "admin" {
+			c.JSON(http.StatusForbidden, dto.ErrorResponse{Error: "admin access required"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // GetClaims retrieves the claims Auth stored on this request. Returns nil
 // if Auth never ran (or failed).
 func GetClaims(c *gin.Context) *token.Claims {
