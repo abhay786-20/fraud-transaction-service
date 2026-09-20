@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -41,6 +42,44 @@ func (f *fakeTransactionRepository) List(ctx context.Context, filter repository.
 		return nil, 0, nil
 	}
 	return []models.Transaction{*f.created}, 1, nil
+}
+
+func (f *fakeTransactionRepository) Flag(ctx context.Context, id string) (*models.Transaction, error) {
+	if f.created == nil || f.created.ID != id {
+		return nil, repository.ErrTransactionNotFound
+	}
+	if f.created.Status != "completed" {
+		return nil, repository.ErrTransactionNotFlaggable
+	}
+	f.created.Status = "flagged"
+	return f.created, nil
+}
+
+func (f *fakeTransactionRepository) Unflag(ctx context.Context, id string) (*models.Transaction, error) {
+	if f.created == nil || f.created.ID != id {
+		return nil, repository.ErrTransactionNotFound
+	}
+	if f.created.Status != "flagged" {
+		return nil, repository.ErrTransactionNotFlagged
+	}
+	f.created.Status = "completed"
+	return f.created, nil
+}
+
+// fakeAlertPublisher is an in-memory stand-in for AlertPublisher (normally
+// *kafka.Producer) — records published messages instead of touching a
+// real Kafka broker.
+type fakeAlertPublisher struct {
+	published  [][]byte
+	publishErr error
+}
+
+func (f *fakeAlertPublisher) Publish(ctx context.Context, key string, value []byte) error {
+	if f.publishErr != nil {
+		return f.publishErr
+	}
+	f.published = append(f.published, value)
+	return nil
 }
 
 // fakeUserVerifier is an in-memory stand-in for UserVerifier (normally
@@ -123,7 +162,7 @@ func TestTransactionService_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &fakeTransactionRepository{createErr: tt.repoErr}
-			svc := NewTransactionService(repo, newVerifier(), zap.NewNop())
+			svc := NewTransactionService(repo, newVerifier(), &fakeAlertPublisher{}, zap.NewNop())
 
 			txn, err := svc.Create(context.Background(), senderID, tt.receiverID, tt.amount, "")
 
@@ -150,4 +189,165 @@ func TestTransactionService_Create(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTransactionService_Flag(t *testing.T) {
+	t.Run("flags a completed transaction and publishes an alert", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{
+			ID: "txn-1", SenderID: "sender-1", ReceiverID: "receiver-1", Amount: "500.00", Currency: "INR", Status: "completed",
+		}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		txn, err := svc.Flag(context.Background(), "txn-1", "looks like a mule account")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if txn.Status != "flagged" {
+			t.Errorf("got status %q, want %q", txn.Status, "flagged")
+		}
+		if len(publisher.published) != 1 {
+			t.Fatalf("got %d published alerts, want 1", len(publisher.published))
+		}
+
+		var alert manualFraudAlertPayload
+		if err := json.Unmarshal(publisher.published[0], &alert); err != nil {
+			t.Fatalf("published alert isn't valid JSON: %v", err)
+		}
+		if alert.TransactionID != "txn-1" || alert.SenderID != "sender-1" || alert.ReceiverID != "receiver-1" {
+			t.Errorf("published alert has wrong transaction/sender/receiver: %+v", alert)
+		}
+		if len(alert.TriggeredRules) != 1 || alert.TriggeredRules[0].Reason != "looks like a mule account" {
+			t.Errorf("published alert missing the given reason: %+v", alert.TriggeredRules)
+		}
+	})
+
+	t.Run("empty reason falls back to a default", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "completed"}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Flag(context.Background(), "txn-1", ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var alert manualFraudAlertPayload
+		if err := json.Unmarshal(publisher.published[0], &alert); err != nil {
+			t.Fatalf("published alert isn't valid JSON: %v", err)
+		}
+		if alert.TriggeredRules[0].Reason != defaultFlagReason {
+			t.Errorf("got reason %q, want default %q", alert.TriggeredRules[0].Reason, defaultFlagReason)
+		}
+	})
+
+	t.Run("not found and not-flaggable errors bubble up without publishing", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "flagged"}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Flag(context.Background(), "txn-1", ""); !errors.Is(err, repository.ErrTransactionNotFlaggable) {
+			t.Fatalf("got error %v, want %v", err, repository.ErrTransactionNotFlaggable)
+		}
+		if _, err := svc.Flag(context.Background(), "does-not-exist", ""); !errors.Is(err, repository.ErrTransactionNotFound) {
+			t.Fatalf("got error %v, want %v", err, repository.ErrTransactionNotFound)
+		}
+		if len(publisher.published) != 0 {
+			t.Errorf("expected no alerts published, got %d", len(publisher.published))
+		}
+	})
+
+	t.Run("a publish failure surfaces as an error, even though the flag already committed", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "completed"}}
+		publisher := &fakeAlertPublisher{publishErr: errors.New("kafka is down")}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Flag(context.Background(), "txn-1", ""); err == nil {
+			t.Fatal("expected an error when publishing fails")
+		}
+		if repo.created.Status != "flagged" {
+			t.Errorf("expected the status change to have already committed, got %q", repo.created.Status)
+		}
+	})
+}
+
+func TestTransactionService_Unflag(t *testing.T) {
+	t.Run("unflags a flagged transaction and publishes a cleared alert", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{
+			ID: "txn-1", SenderID: "sender-1", ReceiverID: "receiver-1", Amount: "500.00", Currency: "INR", Status: "flagged",
+		}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		txn, err := svc.Unflag(context.Background(), "txn-1", "confirmed legitimate with the sender")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if txn.Status != "completed" {
+			t.Errorf("got status %q, want %q", txn.Status, "completed")
+		}
+		if len(publisher.published) != 1 {
+			t.Fatalf("got %d published alerts, want 1", len(publisher.published))
+		}
+
+		var alert manualFraudAlertPayload
+		if err := json.Unmarshal(publisher.published[0], &alert); err != nil {
+			t.Fatalf("published alert isn't valid JSON: %v", err)
+		}
+		if !alert.Cleared {
+			t.Error("expected Cleared to be true")
+		}
+		if alert.Reason != "confirmed legitimate with the sender" {
+			t.Errorf("got reason %q, want the given reason", alert.Reason)
+		}
+		if alert.TransactionID != "txn-1" || alert.SenderID != "sender-1" || alert.ReceiverID != "receiver-1" {
+			t.Errorf("published alert has wrong transaction/sender/receiver: %+v", alert)
+		}
+	})
+
+	t.Run("empty reason falls back to a default", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "flagged"}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Unflag(context.Background(), "txn-1", ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var alert manualFraudAlertPayload
+		if err := json.Unmarshal(publisher.published[0], &alert); err != nil {
+			t.Fatalf("published alert isn't valid JSON: %v", err)
+		}
+		if alert.Reason != defaultUnflagReason {
+			t.Errorf("got reason %q, want default %q", alert.Reason, defaultUnflagReason)
+		}
+	})
+
+	t.Run("not found and not-flagged errors bubble up without publishing", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "completed"}}
+		publisher := &fakeAlertPublisher{}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Unflag(context.Background(), "txn-1", ""); !errors.Is(err, repository.ErrTransactionNotFlagged) {
+			t.Fatalf("got error %v, want %v", err, repository.ErrTransactionNotFlagged)
+		}
+		if _, err := svc.Unflag(context.Background(), "does-not-exist", ""); !errors.Is(err, repository.ErrTransactionNotFound) {
+			t.Fatalf("got error %v, want %v", err, repository.ErrTransactionNotFound)
+		}
+		if len(publisher.published) != 0 {
+			t.Errorf("expected no alerts published, got %d", len(publisher.published))
+		}
+	})
+
+	t.Run("a publish failure surfaces as an error, even though the unflag already committed", func(t *testing.T) {
+		repo := &fakeTransactionRepository{created: &models.Transaction{ID: "txn-1", Status: "flagged"}}
+		publisher := &fakeAlertPublisher{publishErr: errors.New("kafka is down")}
+		svc := NewTransactionService(repo, newFakeUserVerifier(), publisher, zap.NewNop())
+
+		if _, err := svc.Unflag(context.Background(), "txn-1", ""); err == nil {
+			t.Fatal("expected an error when publishing fails")
+		}
+		if repo.created.Status != "completed" {
+			t.Errorf("expected the status change to have already committed, got %q", repo.created.Status)
+		}
+	})
 }

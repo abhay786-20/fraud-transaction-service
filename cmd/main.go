@@ -59,7 +59,14 @@ func main() {
 	walletRepo := repository.NewWalletRepository(pg, log)
 	txnRepo := repository.NewTransactionRepository(pg, walletRepo, log)
 	authClient := authclient.New(cfg.Auth.ServiceBaseURL, cfg.Auth.ServiceAPIKey)
-	txnService := service.NewTransactionService(txnRepo, authClient, log)
+	// alertProducer is a SEPARATE Kafka producer from the outbox worker's
+	// below — it publishes directly to the "fraud-alerts" topic (the same
+	// one fraud-engine-service publishes to automatically), used only by
+	// TransactionService.Flag for an admin's manual fraud flag. See that
+	// method's doc comment for why this bypasses the Outbox Pattern.
+	alertProducer := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.AlertsTopic)
+	defer alertProducer.Close()
+	txnService := service.NewTransactionService(txnRepo, authClient, alertProducer, log)
 	walletService := service.NewWalletService(walletRepo, log)
 	txnHandler := handler.NewTransactionHandler(txnService)
 	walletHandler := handler.NewWalletHandler(walletService)

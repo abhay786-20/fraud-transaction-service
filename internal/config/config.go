@@ -41,8 +41,9 @@ type AuthConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers []string
-	Topic   string
+	Brokers     []string
+	Topic       string
+	AlertsTopic string
 }
 
 func Load() (*Config, error) {
@@ -72,8 +73,9 @@ func Load() (*Config, error) {
 			ServiceAPIKey:  os.Getenv(constants.EnvAuthServiceAPIKey),
 		},
 		Kafka: KafkaConfig{
-			Brokers: env.GetStringSlice(constants.EnvKafkaBrokers, []string{"localhost:9092"}),
-			Topic:   env.GetString(constants.EnvKafkaTopic, "transactions"),
+			Brokers:     env.GetStringSlice(constants.EnvKafkaBrokers, []string{"localhost:9092"}),
+			Topic:       env.GetString(constants.EnvKafkaTopic, "transactions"),
+			AlertsTopic: env.GetString(constants.EnvKafkaAlertsTopic, "fraud-alerts"),
 		},
 	}
 

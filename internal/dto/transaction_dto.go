@@ -42,6 +42,14 @@ func NewTransactionResponse(t *models.Transaction) TransactionResponse {
 	}
 }
 
+// FlagTransactionRequest is the body for POST /transactions/:id/flag AND
+// POST /transactions/:id/unflag — same shape either way. Reason is
+// optional — the service falls back to a direction-appropriate default if
+// it's left blank.
+type FlagTransactionRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 // TransactionListResponse is the paginated response body for GET /transactions.
 type TransactionListResponse struct {
 	Transactions []TransactionResponse `json:"transactions"`

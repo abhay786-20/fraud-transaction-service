@@ -24,6 +24,11 @@ const (
 
 	EnvKafkaBrokers = "TRANSACTION_KAFKA_BROKERS"
 	EnvKafkaTopic   = "TRANSACTION_KAFKA_TOPIC"
+	// EnvKafkaAlertsTopic must hold the SAME VALUE as fraud-engine-service's
+	// KAFKA_ALERTS_TOPIC — this service publishes directly to it for
+	// admin-triggered manual flags (see service.TransactionService.Flag),
+	// the same topic/shape fraud-engine-service publishes to automatically.
+	EnvKafkaAlertsTopic = "TRANSACTION_KAFKA_ALERTS_TOPIC"
 
 	// For calling fraud-auth-service's /internal/* routes to verify a
 	// receiver exists. EnvAuthServiceAPIKey must match fraud-auth-service's

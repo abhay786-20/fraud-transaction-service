@@ -31,6 +31,8 @@ func New(pg *sqlx.DB, jwtSecret string, txnHandler *handler.TransactionHandler, 
 	requireAdmin := middleware.RequireAdmin()
 	r.POST("/transactions", auth, txnHandler.Create)
 	r.GET("/transactions", auth, requireAdmin, txnHandler.List)
+	r.POST("/transactions/:id/flag", auth, requireAdmin, txnHandler.Flag)
+	r.POST("/transactions/:id/unflag", auth, requireAdmin, txnHandler.Unflag)
 
 	r.POST("/wallets", auth, walletHandler.Create)
 	r.GET("/wallets/me", auth, walletHandler.GetMine)

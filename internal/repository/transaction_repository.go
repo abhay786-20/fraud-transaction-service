@@ -5,23 +5,49 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/abhay786-20/fraud-transaction-service/internal/models"
 )
 
-var ErrTransactionNotFound = errors.New("transaction not found")
+var (
+	ErrTransactionNotFound = errors.New("transaction not found")
+	// ErrTransactionNotFlaggable covers every status Flag refuses to
+	// transition from: already 'flagged' (no double-notifying), or
+	// 'pending'/'failed' (nothing to flag as suspicious yet/anymore). One
+	// sentinel for all three — the handler doesn't need to tell them apart,
+	// the admin just needs to know this transaction can't be flagged right now.
+	ErrTransactionNotFlaggable = errors.New("transaction cannot be flagged from its current status")
+	// ErrTransactionNotFlagged is Unflag's mirror of ErrTransactionNotFlaggable
+	// — returned when the transaction isn't currently 'flagged', so there's
+	// nothing to clear.
+	ErrTransactionNotFlagged = errors.New("transaction is not currently flagged")
+)
 
-// TransactionListFilter mirrors fraud-auth-service's UserListFilter shape —
-// just pagination for now, no column filters yet (every transaction's
-// status is currently always "completed", so a status filter wouldn't
-// narrow anything).
+// TransactionListFilter powers the admin dashboard's Transactions tab
+// search/filter bar. This service owns none of the sender/receiver
+// name/email data being searched, so Search/SearchUserIDs are two halves
+// of ONE logical search box the caller already split: the dashboard
+// resolves a typed name to user IDs via fraud-auth-service first, then
+// hands both the raw text (matched against this service's own id column)
+// and the resolved IDs (matched against sender_id/receiver_id) here —
+// see the OR'd search clause in buildTransactionFilter.
 type TransactionListFilter struct {
-	Limit  int
-	Offset int
+	// Status, when non-empty, is an exact match against the status column.
+	Status string
+	// Search, when non-empty, matches transactions whose ID contains this
+	// text (case-insensitive).
+	Search string
+	// SearchUserIDs, when non-empty, matches transactions whose sender OR
+	// receiver is one of these IDs.
+	SearchUserIDs []string
+	Limit         int
+	Offset        int
 }
 
 type TransactionRepository interface {
@@ -33,6 +59,15 @@ type TransactionRepository interface {
 	// List powers the admin dashboard's Transactions tab — most-recent
 	// first, paginated, plus the total count across all pages.
 	List(ctx context.Context, filter TransactionListFilter) ([]models.Transaction, int, error)
+	// Flag transitions a transaction from 'completed' to 'flagged' — an
+	// admin's manual call that a completed transaction looks fraudulent,
+	// distinct from fraud-engine-service's automatic scoring. Only
+	// 'completed' transactions are eligible; see ErrTransactionNotFlaggable.
+	Flag(ctx context.Context, id string) (*models.Transaction, error)
+	// Unflag is Flag's reverse — an admin's manual call that a flagged
+	// transaction was a false alarm. Only 'flagged' transactions are
+	// eligible; see ErrTransactionNotFlagged.
+	Unflag(ctx context.Context, id string) (*models.Transaction, error)
 }
 
 type postgresTransactionRepository struct {
@@ -133,6 +168,7 @@ func (r *postgresTransactionRepository) GetByID(ctx context.Context, id string) 
 
 func (r *postgresTransactionRepository) List(ctx context.Context, filter TransactionListFilter) ([]models.Transaction, int, error) {
 	start := time.Now()
+	where, args := buildTransactionFilter(filter)
 
 	limit := filter.Limit
 	if limit <= 0 {
@@ -144,18 +180,103 @@ func (r *postgresTransactionRepository) List(ctx context.Context, filter Transac
 	}
 
 	var total int
-	if err := r.db.GetContext(ctx, &total, "SELECT COUNT(*) FROM transactions"); err != nil {
+	countQuery := "SELECT COUNT(*) FROM transactions " + where
+	if err := r.db.GetContext(ctx, &total, countQuery, args...); err != nil {
 		r.debugQuery("transaction.List.count", start, err)
 		return nil, 0, fmt.Errorf("counting transactions: %w", err)
 	}
 
+	listArgs := append(args, limit, offset)
+	listQuery := fmt.Sprintf(
+		"SELECT * FROM transactions %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d",
+		where, len(args)+1, len(args)+2,
+	)
+
 	var txns []models.Transaction
-	err := r.db.SelectContext(ctx, &txns,
-		"SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2", limit, offset)
+	err := r.db.SelectContext(ctx, &txns, listQuery, listArgs...)
 	r.debugQuery("transaction.List", start, err)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing transactions: %w", err)
 	}
 
 	return txns, total, nil
+}
+
+// buildTransactionFilter turns a TransactionListFilter into a "WHERE ..."
+// clause plus its matching placeholder arguments — same pattern as
+// fraud-auth-service's buildUserFilter. Values always go through numbered
+// placeholders, never string-concatenated, so this stays safe from SQL
+// injection regardless of filter content.
+func buildTransactionFilter(filter TransactionListFilter) (string, []any) {
+	var conditions []string
+	var args []any
+
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		conditions = append(conditions, fmt.Sprintf("status = $%d", len(args)))
+	}
+
+	// Search and SearchUserIDs are OR'd together, not AND'd — they're two
+	// halves of ONE search box (id text match vs. resolved sender/receiver
+	// IDs), not two independent filters. Status stays a separate AND.
+	if filter.Search != "" || len(filter.SearchUserIDs) > 0 {
+		var searchConditions []string
+		if filter.Search != "" {
+			args = append(args, "%"+filter.Search+"%")
+			searchConditions = append(searchConditions, fmt.Sprintf("id::text ILIKE $%d", len(args)))
+		}
+		if len(filter.SearchUserIDs) > 0 {
+			args = append(args, pq.Array(filter.SearchUserIDs))
+			searchConditions = append(searchConditions, fmt.Sprintf("(sender_id = ANY($%d) OR receiver_id = ANY($%d))", len(args), len(args)))
+		}
+		conditions = append(conditions, "("+strings.Join(searchConditions, " OR ")+")")
+	}
+
+	if len(conditions) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(conditions, " AND "), args
+}
+
+func (r *postgresTransactionRepository) Flag(ctx context.Context, id string) (*models.Transaction, error) {
+	return r.transitionStatus(ctx, id, "transaction.Flag", "completed", "flagged", ErrTransactionNotFlaggable)
+}
+
+func (r *postgresTransactionRepository) Unflag(ctx context.Context, id string) (*models.Transaction, error) {
+	return r.transitionStatus(ctx, id, "transaction.Unflag", "flagged", "completed", ErrTransactionNotFlagged)
+}
+
+// transitionStatus is the shared implementation behind Flag/Unflag — both
+// are "move from exactly one required status to another, or tell the
+// caller precisely why not" with nothing else different between them.
+func (r *postgresTransactionRepository) transitionStatus(
+	ctx context.Context, id, op, fromStatus, toStatus string, ineligibleErr error,
+) (*models.Transaction, error) {
+	start := time.Now()
+	const query = `
+		UPDATE transactions SET status = $2, updated_at = now()
+		WHERE id = $1 AND status = $3
+		RETURNING sender_id, receiver_id, amount, currency, status, created_at, updated_at`
+
+	txn := &models.Transaction{ID: id}
+	row := r.db.QueryRowxContext(ctx, query, id, toStatus, fromStatus)
+	err := row.Scan(&txn.SenderID, &txn.ReceiverID, &txn.Amount, &txn.Currency, &txn.Status, &txn.CreatedAt, &txn.UpdatedAt)
+	r.debugQuery(op, start, err)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Zero rows: either the transaction doesn't exist at all, or it
+			// exists but wasn't in fromStatus — distinguish so the admin
+			// gets an accurate error either way.
+			var exists bool
+			if lookupErr := r.db.GetContext(ctx, &exists, "SELECT EXISTS(SELECT 1 FROM transactions WHERE id = $1)", id); lookupErr != nil {
+				return nil, fmt.Errorf("checking transaction existence: %w", lookupErr)
+			}
+			if !exists {
+				return nil, ErrTransactionNotFound
+			}
+			return nil, ineligibleErr
+		}
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return txn, nil
 }
